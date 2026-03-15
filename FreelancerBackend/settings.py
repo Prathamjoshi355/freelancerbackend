@@ -26,19 +26,35 @@ SECRET_KEY = 'django-insecure-*fa!5u@di2(k-qzqua=rk1azqb*6!gk+dii6vi-@4cf#y)gg5r
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*.localhost', '127.0.0.1:3000', 'localhost:3000']
 
+# CORS Configuration
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+
+CORS_ALLOW_CREDENTIALS = True
 
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'accounts',
+    'profiles',
+    'jobs',
+    'proposals',
+    'payments',
+    'chat',
+    'notifications',
     'dj_rest_auth',
     'dj_rest_auth.registration', 
     'corsheaders',
@@ -48,7 +64,6 @@ INSTALLED_APPS = [
     'allauth.socialaccount',
     'allauth.socialaccount.providers.google',
     'rest_framework.authtoken',
-
 ] 
 
 MIDDLEWARE = [
@@ -87,19 +102,52 @@ TEMPLATES = [
 WSGI_APPLICATION = 'FreelancerBackend.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
+# ============================================================
+# DATABASE CONFIGURATION - MONGODB ONLY
+# ============================================================
+# Using MongoDB with MongoEngine ORM
+# SQLite has been removed from this project
+# https://docs.mongoengine.org/projects/mongoengine/en/stable/
 
+import mongoengine
+import os
+
+# Django ORM Databases - NOT USED (kept for Django compatibility)
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': ':memory:',  # Use in-memory SQLite for Django migrations only
     }
 }
-# New recommended allauth settings
-ACCOUNT_LOGIN_METHODS = {"email"}
-ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
 
+# ============================================================
+# MONGODB CONFIGURATION (Primary Database)
+# ============================================================
+
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'freelancer_db')
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/talenthub')
+
+# MongoDB Connection Settings
+try:
+    mongoengine.disconnect()
+    mongoengine.connect(
+        db=MONGO_DB_NAME,
+        host=MONGO_URI,
+        retryWrites=False,
+        connect=True,
+        serverSelectionTimeoutMS=10000,
+    )
+    print(f"✅ MongoDB Connected: {MONGO_DB_NAME} @mongodb://localhost:27017/talenthub")
+except Exception as e:
+    print(f"⚠️  MongoDB Connection Warning: {str(e)}")
+    print(f"⚠️  Make sure MongoDB is running: mongod --dbpath C:\\data\\db")
+
+
+# New recommended allauth settings
+ACCOUNT_AUTHENTICATION_METHOD = 'email'
+ACCOUNT_EMAIL_REQUIRED = True
+ACCOUNT_UNIQUE_EMAIL = True
+ACCOUNT_USERNAME_REQUIRED = False
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 
 
@@ -123,14 +171,27 @@ AUTH_PASSWORD_VALIDATORS = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'accounts.auth.MongoEngineJWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',   )
+        'rest_framework.permissions.IsAuthenticated',
+    )
 }
-SIMPLE_JWT = { 
+
+SIMPLE_JWT = {
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'VERIFYING_KEY': None,
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=3),
+    'ROTATE_REFRESH_TOKENS': False,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': False,
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+    'JTI_CLAIM': 'jti',
 }
 # CORS_ALLOWED_ORIGINS = [
 #     "http://localhost:3000",
@@ -141,6 +202,7 @@ CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
 AUTHENTICATION_BACKENDS = (
+    'accounts.auth.MongoEngineJWTAuthentication',
     'django.contrib.auth.backends.ModelBackend',  
     'allauth.account.auth_backends.AuthenticationBackend',  
     )
@@ -164,7 +226,9 @@ CSRF_TRUSTED_ORIGINS = [
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
-AUTH_USER_MODEL = 'accounts.CustomUser'
+# MongoDB Models do not need AUTH_USER_MODEL (MongoEngine handles authentication)
+# AUTH_USER_MODEL = 'accounts.CustomUser'
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 

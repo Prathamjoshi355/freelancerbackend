@@ -1,7 +1,8 @@
 from django.shortcuts import render, redirect
 # from django.contrib.auth.models import User
 from .models import CustomUser
-from rest_framework import viewsets ,generics
+from rest_framework import viewsets
+from rest_framework.views import APIView
 from .serializers import UserSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from allauth.socialaccount.models import SocialToken, SocialAccount
@@ -15,7 +16,6 @@ import json
 from django.contrib.auth import authenticate
 # from django.contrib.auth.models import User
 from rest_framework.decorators import api_view
-
 # from rest_framework.views import APIView
 from rest_framework.response import Response
 # from rest_framework import status
@@ -35,7 +35,6 @@ user = get_user_model()
 # from django.shortcuts import render, redirect
 # from django.contrib.auth.forms import UserCreationForm
 # from django.contrib import messages
-
 # def register_user(request):
 #     if request.method == 'POST':
 #         form = UserCreationForm(request.POST)
@@ -48,14 +47,14 @@ user = get_user_model()
 #         form = UserCreationForm()
 #     return render(request, 'accounts/register.html', {'form': form})
 from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.views import APIView
 from .serializers import MyTokenObtainPairSerializer
 
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
+    permission_classes = [AllowAny]
 
-class UserCreateView(generics.CreateAPIView):
-    # queryset = User.objects.all()
-    queryset = CustomUser.objects.all()
+class UserCreateView(APIView):
     serializer_class = UserSerializer
     permission_classes = [AllowAny]
    
@@ -66,19 +65,56 @@ class UserCreateView(generics.CreateAPIView):
 
     def post(self, request, *args, **kwargs):
         print("Incoming registration data:", request.data)
-        return super().post(request, *args, **kwargs)
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'message': 'User created successfully',
+                'user': {
+                    'email': user.email,
+                    'role': user.role,
+                },
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
      
-class UserDetailView(generics.RetrieveUpdateAPIView):
-    queryset =  CustomUser.objects.all()
-    
+class UserDetailView(APIView):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]  
-    # def get_object(self):
-    #     # Return only the authenticated user's data
-    #     return self.request.user
-    def get_object(self):
+    
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        # Return user data directly for reading
+        return Response({
+            'email': user.email,
+            'full_name': user.full_name,
+            'company_name': user.company_name,
+            'role': user.role,
+            'created_at': user.created_at.isoformat() if user.created_at else None,
+        }, status=status.HTTP_200_OK)
+    
+    def put(self, request, *args, **kwargs):
+        user = request.user
+        # Update allowed fields
+        allowed_fields = {'full_name', 'company_name'}
+        update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
         
-        return self.request.user
+        for field, value in update_data.items():
+            setattr(user, field, value)
+        user.save()
+        
+        return Response({
+            'email': user.email,
+            'full_name': user.full_name,
+            'company_name': user.company_name,
+            'role': user.role,
+            'message': 'User updated successfully'
+        }, status=status.HTTP_200_OK)
+    
+    def patch(self, request, *args, **kwargs):
+        return self.put(request, *args, **kwargs)
 @api_view(['POST'])
 def login_view(request):
     email = request.data.get('email')
