@@ -1,9 +1,10 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
-from .views import ConversationViewSet, MessageViewSet
 
-router = DefaultRouter()
-router.register(r'conversations', ConversationViewSet, basename='conversation')
-router.register(r'messages', MessageViewSet, basename='message')
+from .views import ChatProtectionAnalyzeView, ContractConversationView, ContractMessageView
 
-urlpatterns = [] + router.urls
+
+urlpatterns = [
+    path("protection/analyze/", ChatProtectionAnalyzeView.as_view(), name="chat-protection-analyze"),
+    path("contracts/<str:contract_id>/", ContractConversationView.as_view(), name="chat-contract"),
+    path("contracts/<str:contract_id>/messages/", ContractMessageView.as_view(), name="chat-messages"),
+]

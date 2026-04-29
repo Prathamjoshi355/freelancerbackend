@@ -1,188 +1,127 @@
-from django.shortcuts import render, redirect
-# from django.contrib.auth.models import User
-from .models import CustomUser
-from rest_framework import viewsets
-from rest_framework.views import APIView
-from .serializers import UserSerializer
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from allauth.socialaccount.models import SocialToken, SocialAccount
-from django.contrib.auth.decorators import login_required
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import get_user_model
-from django.http import JsonResponse
+from django.utils import timezone
 from rest_framework import status
-from django.views.decorators.csrf import csrf_exempt
-import json
-from django.contrib.auth import authenticate
-# from django.contrib.auth.models import User
-from rest_framework.decorators import api_view
-# from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-# from rest_framework import status
-# # from django.shortcuts import render, redirect
-# from django.contrib.auth.forms import UserCreationForm
-# from django.contrib import messages
-# class RegisterView(APIView):
-#     def post(self, request):
-#         print("Incoming registration data:", request.data)  # for debugging
-#         serializer = UserSerializer(data=request.data)
-#         if serializer.is_valid():
-#             serializer.save()
-#             return Response({"message": "User created successfully"}, status=status.HTTP_201_CREATED)
-#         print("Serializer errors:", serializer.errors)
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-user = get_user_model()
-# from django.shortcuts import render, redirect
-# from django.contrib.auth.forms import UserCreationForm
-# from django.contrib import messages
-# def register_user(request):
-#     if request.method == 'POST':
-#         form = UserCreationForm(request.POST)
-#         if form.is_valid():
-#             form.save()
-#             username = form.cleaned_data.get('username')
-#             messages.success(request, f'Account created for {username}!')
-#             return redirect('login')  # redirect to login or homepage
-#     else:
-#         form = UserCreationForm()
-#     return render(request, 'accounts/register.html', {'form': form})
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
-from .serializers import MyTokenObtainPairSerializer
+from rest_framework_simplejwt.views import TokenObtainPairView
 
-class MyTokenObtainPairView(TokenObtainPairView):
-    serializer_class = MyTokenObtainPairSerializer
+from core.policies import (
+    get_or_create_profile,
+    get_workflow_state,
+    serialize_datetime,
+    sync_user_account_status,
+    verify_face_for_user,
+)
+from profiles.serializers import serialize_profile
+from .serializers import (
+    FaceVerificationSerializer,
+    MarketplaceTokenObtainPairSerializer,
+    RegistrationSerializer,
+    serialize_user,
+)
+
+
+class AuthThrottle(AnonRateThrottle):
+    scope = "auth"
+
+
+class RegistrationThrottle(AnonRateThrottle):
+    scope = "registration"
+
+
+class RegisterView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [RegistrationThrottle]
 
-class UserCreateView(APIView):
-    serializer_class = UserSerializer
+    def post(self, request):
+        serializer = RegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        profile = get_or_create_profile(user)
+        sync_user_account_status(user)
+
+        token_serializer = MarketplaceTokenObtainPairSerializer(
+            data={"email": user.email, "password": request.data.get("password")}
+        )
+        token_serializer.is_valid(raise_exception=True)
+
+        return Response(
+            {
+                "message": "Registration successful. Complete your profile to unlock marketplace access.",
+                "user": serialize_user(user),
+                "profile": serialize_profile(profile, include_private=True),
+                "workflow": get_workflow_state(user),
+                **token_serializer.validated_data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MarketplaceTokenView(TokenObtainPairView):
+    serializer_class = MarketplaceTokenObtainPairSerializer
     permission_classes = [AllowAny]
-   
-    
-    def get(self, request, *args, **kwargs):
-        return Response({"message": "User registration endpoint is working!"}) 
-    
+    throttle_classes = [AuthThrottle]
 
-    def post(self, request, *args, **kwargs):
-        print("Incoming registration data:", request.data)
-        serializer = self.serializer_class(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'message': 'User created successfully',
-                'user': {
-                    'email': user.email,
-                    'role': user.role,
-                },
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-     
-class UserDetailView(APIView):
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]  
-    
-    def get(self, request, *args, **kwargs):
+
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
         user = request.user
-        # Return user data directly for reading
-        return Response({
-            'email': user.email,
-            'full_name': user.full_name,
-            'company_name': user.company_name,
-            'role': user.role,
-            'created_at': user.created_at.isoformat() if user.created_at else None,
-        }, status=status.HTTP_200_OK)
-    
-    def put(self, request, *args, **kwargs):
-        user = request.user
-        # Update allowed fields
-        allowed_fields = {'full_name', 'company_name'}
-        update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
-        
-        for field, value in update_data.items():
-            setattr(user, field, value)
-        user.save()
-        
-        return Response({
-            'email': user.email,
-            'full_name': user.full_name,
-            'company_name': user.company_name,
-            'role': user.role,
-            'message': 'User updated successfully'
-        }, status=status.HTTP_200_OK)
-    
-    def patch(self, request, *args, **kwargs):
-        return self.put(request, *args, **kwargs)
-@api_view(['POST'])
-def login_view(request):
-    email = request.data.get('email')
-    password = request.data.get('password')
+        profile = get_or_create_profile(user)
+        workflow = get_workflow_state(user)
 
-    if not email or not password:
-        return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "user": serialize_user(user),
+                "profile": serialize_profile(profile, include_private=True),
+                "workflow": workflow,
+                "stats": self._build_stats(user),
+            }
+        )
 
-    try:
-        user = CustomUser.objects.get(email=email)
-    except CustomUser.DoesNotExist:
-        return Response({"detail": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+    def _build_stats(self, user):
+        if user.role == "client":
+            from jobs.models import Contract, Job
 
-    # Authenticate user
-    user_auth = authenticate(request, username=email, password=password)
-    if not user_auth:
-        return Response({"detail": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+            return {
+                "open_jobs": Job.objects(client=user, status="open").count(),
+                "closed_jobs": Job.objects(client=user, status="closed").count(),
+                "active_contracts": Contract.objects(client=user, status__in=["active", "funded"]).count(),
+            }
 
-    # Generate JWT tokens (optional if you're using JWT)
-    refresh = RefreshToken.for_user(user)
-    access_token = str(refresh.access_token)
+        from bidding.models import Bid
+        from jobs.models import Contract
+        from skill_tests.models import FreelancerSkill
 
-    # Return response including role (no need to send role from frontend)
-    return Response({
-        "message": "Login successful",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "role": user.role
-            # "name": f"{user.first_name} {user.last_name}".strip() or user.email,
-        },
-        "tokens": {
-            "access": access_token,
-            "refresh": str(refresh)
+        return {
+            "active_bids": Bid.objects(freelancer=user, status="pending").count(),
+            "active_contracts": Contract.objects(freelancer=user, status__in=["active", "funded"]).count(),
+            "passed_skills": FreelancerSkill.objects(user=user, test_status="passed").count(),
         }
-    }, status=status.HTTP_200_OK)
 
-@login_required
-def google_login_callback(request):
-    user = request.user
 
-    social_account = SocialAccount.objects.filter(user=user)
-    print("Social Account for User: ", social_account)
-    
-    social_account = social_account.first() 
+class FaceLoginVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
 
-    if not social_account:
-        print("Social Account not exists for user:", user )
-        return redirect('https://127.0.0.1:8000/login/callback?error=NoSocialAccount')  # Redirect to login if no social account found
-    token = SocialToken.objects.filter(account__user=user, account__provider='google').first()
-    if token:
-        print("Google Token for User: ", token.token)
-        refresh = RefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        return redirect(f'https://127.0.0.1:8000/login/callback?token={access_token}')  
-    else:
-        print("No Google Token found:", user )
-        return redirect('https://127.0.0.1:8000/login/callback?error=NoGoogleToken')  # Redirect to login if no token found
-@csrf_exempt
-def validation_Google_token(request):
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            google_access_token = data.get('access_token')
-            print(google_access_token)
-            if not google_access_token:
-                return JsonResponse({'error': 'Access token is missing'}, status=400) 
-            return JsonResponse({'valid': True})
-        except json.JSONDecodeError:
-            return JsonResponse({'detail': 'Invalid JSON'}, status=400) 
-    return JsonResponse({'detail': 'Method not allowed'}, status=405)
+    def post(self, request):
+        serializer = FaceVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        matched, distance = verify_face_for_user(request.user, serializer.validated_data["face_image"])
+        if not matched:
+            return Response(
+                {"verified": False, "distance": distance, "detail": "Face verification failed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.last_login_at = timezone.now()
+        request.user.save()
+        return Response(
+            {
+                "verified": True,
+                "distance": distance,
+                "verified_at": serialize_datetime(request.user.last_login_at),
+            }
+        )

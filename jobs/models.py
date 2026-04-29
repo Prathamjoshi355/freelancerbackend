@@ -1,66 +1,77 @@
-from mongoengine import Document, StringField, DateTimeField, ReferenceField, ListField, FloatField, IntField, BooleanField
 from datetime import datetime
+
+from mongoengine import (
+    DateTimeField,
+    Document,
+    FloatField,
+    IntField,
+    ListField,
+    ReferenceField,
+    StringField,
+)
+
 from accounts.models import CustomUser
 
+
 class Job(Document):
-    """Job Posting Model"""
     meta = {
-        'collection': 'jobs',
-        'indexes': ['client_id', 'status', 'created_at', 'category']
+        "collection": "jobs",
+        "indexes": ["client", "status", "created_at", "required_skill_slugs"],
     }
-    
-    # Job basic info
-    client_id = ReferenceField(CustomUser, required=True)
+
+    client = ReferenceField(CustomUser, required=True)
     title = StringField(required=True, max_length=200)
     description = StringField(required=True)
-    category = StringField(required=True, max_length=100)
-    
-    # Project details
-    budget_type = StringField(choices=['fixed', 'hourly'], default='fixed')
     budget_min = FloatField(required=True)
     budget_max = FloatField(required=True)
-    hourly_rate = FloatField()  # if hourly
-    duration = StringField(choices=['short', 'medium', 'long'])  # short: <1 month, medium: 1-3 months, long: 3+ months
-    
-    # Requirements
-    required_skills = ListField(StringField())
-    experience_level = StringField(choices=['beginner', 'intermediate', 'expert'], default='intermediate')
-    
-    # Status
-    status = StringField(
-        choices=['open', 'in_progress', 'completed', 'closed'],
-        default='open'
-    )
-    
-    # Metadata
-    is_featured = BooleanField(default=False)
-    views_count = IntField(default=0)
-    proposals_count = IntField(default=0)
-    
+    required_skill_slugs = ListField(StringField(), default=list)
+    status = StringField(required=True, choices=["open", "closed", "completed", "cancelled"], default="open")
+    hired_freelancer = ReferenceField(CustomUser)
+    hired_bid_id = StringField()
+    bid_count = IntField(default=0)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
-    deadline = DateTimeField()
-    
-    def __str__(self):
-        return self.title
-    
+
     def save(self, *args, **kwargs):
         self.updated_at = datetime.utcnow()
-        super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
 
 
-class JobApplication(Document):
-    """Track freelancer applications to jobs"""
+class Contract(Document):
     meta = {
-        'collection': 'job_applications',
-        'indexes': ['job_id', 'freelancer_id']
+        "collection": "contracts",
+        "indexes": [{"fields": ["job"], "unique": True}, "client", "freelancer", "status"],
     }
-    
-    job_id = ReferenceField(Job, required=True)
-    freelancer_id = ReferenceField(CustomUser, required=True)
-    status = StringField(
-        choices=['pending', 'accepted', 'rejected'],
-        default='pending'
-    )
-    
-    applied_at = DateTimeField(default=datetime.utcnow)
+
+    job = ReferenceField(Job, required=True, unique=True)
+    client = ReferenceField(CustomUser, required=True)
+    freelancer = ReferenceField(CustomUser, required=True)
+    bid_id = StringField(required=True)
+    agreed_amount = FloatField(required=True)
+    status = StringField(required=True, choices=["active", "funded", "completed", "cancelled"], default="active")
+    payment_status = StringField(required=True, choices=["unpaid", "paid"], default="unpaid")
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+    completed_at = DateTimeField()
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class Review(Document):
+    meta = {
+        "collection": "reviews",
+        "indexes": [{"fields": ["contract"], "unique": True}, "freelancer", "client", "created_at"],
+    }
+
+    contract = ReferenceField(Contract, required=True, unique=True)
+    job = ReferenceField(Job, required=True)
+    client = ReferenceField(CustomUser, required=True)
+    freelancer = ReferenceField(CustomUser, required=True)
+    rating = IntField(required=True, min_value=1, max_value=5)
+    comment = StringField()
+    client_rating = IntField(min_value=1, max_value=5)
+    client_comment = StringField()
+    client_reviewed_at = DateTimeField()
+    created_at = DateTimeField(default=datetime.utcnow)

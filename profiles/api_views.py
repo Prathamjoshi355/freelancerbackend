@@ -1,168 +1,173 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
+import random
+from datetime import datetime
+
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from core.policies import (
+    compute_final_rating,
+    compute_initial_rating,
+    ensure_freelancer_profile_complete,
+    get_completed_job_ratings,
+    get_or_create_profile,
+    sync_profile_completion,
+)
 from .models import Profile, SkillTest
 from .serializers import ProfileSerializer, SkillTestSerializer
-from datetime import datetime
+
+
+QUESTION_BANK = {
+    "javascript": {
+        "beginner": [{"id": f"js-b-{i}", "question": f"JavaScript beginner question {i}", "type": "mcq"} for i in range(1, 31)],
+        "intermediate": [{"id": f"js-i-{i}", "question": f"JavaScript intermediate question {i}", "type": "mcq"} for i in range(1, 31)],
+        "hard": [{"id": f"js-h-{i}", "question": f"JavaScript hard question {i}", "type": "mcq"} for i in range(1, 21)],
+        "practical": [{"id": f"js-p-{i}", "question": f"JavaScript practical task {i}", "type": "practical"} for i in range(1, 11)],
+    },
+    "react": {
+        "beginner": [{"id": f"react-b-{i}", "question": f"React beginner question {i}", "type": "mcq"} for i in range(1, 31)],
+        "intermediate": [{"id": f"react-i-{i}", "question": f"React intermediate question {i}", "type": "mcq"} for i in range(1, 31)],
+        "hard": [{"id": f"react-h-{i}", "question": f"React hard question {i}", "type": "mcq"} for i in range(1, 21)],
+        "practical": [{"id": f"react-p-{i}", "question": f"React practical task {i}", "type": "practical"} for i in range(1, 11)],
+    },
+    "python": {
+        "beginner": [{"id": f"py-b-{i}", "question": f"Python beginner question {i}", "type": "mcq"} for i in range(1, 31)],
+        "intermediate": [{"id": f"py-i-{i}", "question": f"Python intermediate question {i}", "type": "mcq"} for i in range(1, 31)],
+        "hard": [{"id": f"py-h-{i}", "question": f"Python hard question {i}", "type": "mcq"} for i in range(1, 21)],
+        "practical": [{"id": f"py-p-{i}", "question": f"Python practical task {i}", "type": "practical"} for i in range(1, 11)],
+    },
+}
+
+
+def build_skill_test_payload(skills):
+    rng = random.SystemRandom()
+    normalized_skills = [skill.strip().lower() for skill in skills if skill.strip()]
+    if not normalized_skills:
+        return {"mcq_questions": [], "practical_questions": []}
+
+    mcq_questions = []
+    practical_questions = []
+    used_ids = set()
+
+    for difficulty, count in (("beginner", 20), ("intermediate", 20), ("hard", 10)):
+        pool = []
+        for skill in normalized_skills:
+            bank = QUESTION_BANK.get(skill, QUESTION_BANK["javascript"])
+            pool.extend([{**item, "skill": skill} for item in bank[difficulty]])
+        unique_pool = [item for item in pool if item["id"] not in used_ids]
+        selected = rng.sample(unique_pool, min(count, len(unique_pool)))
+        used_ids.update(item["id"] for item in selected)
+        mcq_questions.extend(selected)
+
+    for skill in normalized_skills:
+        bank = QUESTION_BANK.get(skill, QUESTION_BANK["javascript"])
+        selected = rng.sample(bank["practical"], min(2, len(bank["practical"])))
+        practical_questions.extend([{**item, "skill": skill} for item in selected])
+
+    return {
+        "mcq_questions": mcq_questions[:50],
+        "practical_questions": practical_questions,
+    }
 
 
 class ProfileDetailView(APIView):
-    """Get or update user profile"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
-        """Get current user profile"""
-        try:
-            profile = Profile.objects(user_id=request.user.id).first()
-            if not profile:
-                return Response({
-                    'detail': 'Profile not found',
-                    'profile_completed': False
-                }, status=status.HTTP_404_NOT_FOUND)
-            
-            serializer = ProfileSerializer(profile)
-            return Response({
-                **serializer.data,
-                'id': str(profile.id),
-                'user_id': str(profile.user_id.id)
-            }, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
+        profile = get_or_create_profile(request.user)
+        if request.user.role == 'freelancer' and not profile.full_name:
+            profile.full_name = request.user.full_name
+        sync_profile_completion(profile)
+        profile.save()
+        serializer = ProfileSerializer(profile)
+        return Response({
+            **serializer.data,
+            'id': str(profile.id),
+            'user_id': str(profile.user_id.id),
+        }, status=status.HTTP_200_OK)
+
     def post(self, request):
-        """Create new profile"""
-        try:
-            # Check if profile already exists
-            existing = Profile.objects(user_id=request.user.id).first()
-            if existing:
-                return Response({'detail': 'Profile already exists'}, status=status.HTTP_400_BAD_REQUEST)
-            
-            data = request.data.copy()
-            data['user_id'] = request.user.id
-            
-            serializer = ProfileSerializer(data=data)
-            if serializer.is_valid():
-                profile = serializer.save(user_id=request.user)
-                return Response({
-                    'message': 'Profile created successfully',
-                    **serializer.data,
-                    'id': str(profile.id),
-                    'user_id': str(profile.user_id.id),
-                    'profile_completed': False
-                }, status=status.HTTP_201_CREATED)
-            
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
+        return self.put(request)
+
     def put(self, request):
-        """Update user profile"""
-        try:
-            profile = Profile.objects(user_id=request.user.id).first()
-            if not profile:
-                return Response({'detail': 'Profile not found'}, status=status.HTTP_404_NOT_FOUND)
-            
-            data = request.data.copy()
-            # Remove user_id from data if present
-            data.pop('user_id', None)
-            
-            # Mark as completed if bio, skills, and hourly_rate are provided
-            if data.get('bio') and data.get('skills') and data.get('hourly_rate'):
-                data['profile_completed'] = True
-            
-            serializer = ProfileSerializer(profile, data=data, partial=True)
-            if serializer.is_valid():
-                updated_profile = serializer.save()
-                return Response({
-                    'message': 'Profile updated successfully',
-                    **serializer.data,
-                    'id': str(updated_profile.id),
-                    'user_id': str(updated_profile.user_id.id)
-                }, status=status.HTTP_200_OK)
-            
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        profile = get_or_create_profile(request.user)
+        data = request.data.copy()
+        data.pop('user_id', None)
+        if request.user.role == 'freelancer' and not data.get('full_name'):
+            data['full_name'] = request.user.full_name
+        serializer = ProfileSerializer(profile, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        updated_profile = serializer.save()
+        return Response({
+            'message': 'Profile updated successfully',
+            **ProfileSerializer(updated_profile).data,
+            'id': str(updated_profile.id),
+            'user_id': str(updated_profile.user_id.id),
+        }, status=status.HTTP_200_OK)
 
 
 class SkillTestView(APIView):
-    """Manage skill tests for freelancers"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request, skill=None):
-        """Get skill tests for user"""
-        try:
-            if skill:
-                test = SkillTest.objects(user_id=request.user.id, skill=skill).first()
-                if not test:
-                    return Response({
-                        'detail': f'No test found for skill: {skill}',
-                        'test_available': True
-                    }, status=status.HTTP_404_NOT_FOUND)
-                
-                serializer = SkillTestSerializer(test)
-                return Response({
-                    **serializer.data,
-                    'id': str(test.id)
-                })
-            else:
-                tests = SkillTest.objects(user_id=request.user.id)
-                serializer = SkillTestSerializer(tests, many=True)
-                data = [
-                    {
-                        **item,
-                        'id': str(test.id)
-                    }
-                    for item, test in zip(serializer.data, tests)
-                ]
-                return Response(data)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
-    def post(self, request):
-        """Create or update skill test"""
-        try:
-            skill = request.data.get('skill')
-            score = request.data.get('score')
-            
-            if not skill or score is None:
-                return Response({
-                    'detail': 'skill and score are required'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Check if test already exists
-            test = SkillTest.objects(user_id=request.user.id, skill=skill).first()
-            
+        ensure_freelancer_profile_complete(request.user)
+        profile = get_or_create_profile(request.user)
+        if skill:
+            test = SkillTest.objects(user_id=request.user, skill=skill).first()
             if test:
-                # Update existing test
-                test.score = score
-                test.passed = score >= 70  # 70% is passing score
-                test.completed_at = datetime.utcnow()
-                test.save()
-                
-                serializer = SkillTestSerializer(test)
-                return Response({
-                    'message': 'Skill test updated',
-                    **serializer.data,
-                    'id': str(test.id)
-                }, status=status.HTTP_200_OK)
-            else:
-                # Create new test
-                test = SkillTest(
-                    user_id=request.user,
-                    skill=skill,
-                    score=score,
-                    passed=score >= 70,
-                    completed_at=datetime.utcnow()
-                )
-                test.save()
-                
-                serializer = SkillTestSerializer(test)
-                return Response({
-                    'message': 'Skill test created',
-                    **serializer.data,
-                    'id': str(test.id)
-                }, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({**SkillTestSerializer(test).data, 'id': str(test.id)})
+            generated = build_skill_test_payload([skill])
+            return Response({
+                'skill': skill,
+                **generated,
+                'generated_from_profile_skills': profile.skills,
+            })
+
+        generated = build_skill_test_payload(profile.skills)
+        tests = SkillTest.objects(user_id=request.user)
+        return Response({
+            'skills': profile.skills,
+            'generated_test': generated,
+            'results': [{**SkillTestSerializer(test).data, 'id': str(test.id)} for test in tests],
+        })
+
+    def post(self, request):
+        ensure_freelancer_profile_complete(request.user)
+        profile = get_or_create_profile(request.user)
+        profile_skills = set(skill.lower() for skill in profile.skills)
+        skill = (request.data.get('skill') or '').strip()
+        if not skill or skill.lower() not in profile_skills:
+            return Response({'detail': 'Skill test must match a skill from the profile.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        mcq_score = float(request.data.get('mcq_score', 0))
+        practical_score = float(request.data.get('practical_score', 0))
+        initial_rating = compute_initial_rating(mcq_score, practical_score)
+        final_rating = compute_final_rating(initial_rating, get_completed_job_ratings(request.user))
+
+        test = SkillTest.objects(user_id=request.user, skill=skill).first()
+        if not test:
+            test = SkillTest(user_id=request.user, skill=skill)
+
+        test.mcq_score = mcq_score
+        test.practical_score = practical_score
+        test.score = initial_rating
+        test.passed = initial_rating >= 70
+        test.profile_snapshot_skills = profile.skills
+        test.mcq_questions = request.data.get('mcq_questions', [])
+        test.practical_questions = request.data.get('practical_questions', [])
+        test.completed_at = datetime.utcnow()
+        test.save()
+
+        profile.initial_rating = initial_rating
+        profile.final_rating = final_rating
+        profile.rating = final_rating
+        profile.save()
+
+        return Response({
+            'message': 'Skill test recorded',
+            'initial_rating': initial_rating,
+            'final_rating': final_rating,
+            **SkillTestSerializer(test).data,
+            'id': str(test.id),
+        }, status=status.HTTP_200_OK)

@@ -1,75 +1,101 @@
 from rest_framework import serializers
-from .models import CustomUser
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
- 
 
-class UserSerializer(serializers.Serializer):
-    email = serializers.EmailField(required=True)
-    password = serializers.CharField(write_only=True, required=True)
-    full_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
-    company_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
-    role = serializers.ChoiceField(choices=['freelancer', 'client'], required=True)
+from core.policies import compute_face_embedding, find_duplicate_face, serialize_datetime
+from .models import CustomUser, FaceEmbedding
 
-    def validate(self, data):
-        email = data.get('email')
-        role = data.get('role')
 
-        # ✅ Check if email already exists with the same role (MongoEngine syntax)
-        if CustomUser.objects(email=email, role=role).count() > 0:
-            raise serializers.ValidationError({
-                "email": f"This email is already registered as a {role.capitalize()}."
-            })
+def serialize_user(user):
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "role": user.role,
+        "account_status": user.account_status,
+        "email_verified": bool(getattr(user, "email_verified", bool(user.email))),
+        "face_verified": user.face_verified,
+        "phone_verified": bool(getattr(user, "phone_verified", False)),
+        "identity_verified": bool(getattr(user, "identity_verified", False)),
+        "is_restricted": user.is_restricted,
+        "restriction_reason": user.restriction_reason,
+        "violation_count": user.violation_count,
+        "created_at": serialize_datetime(user.created_at),
+    }
 
-        # Role-based validation (your existing logic)
-        if role == 'freelancer':
-            if not data.get('full_name'):
-                raise serializers.ValidationError({"full_name": "Full name is required for freelancers."})
-            data.pop('company_name', None)
 
-        elif role == 'client':
-            if not data.get('company_name'):
-                raise serializers.ValidationError({"company_name": "Company name is required for clients."})
-            data.pop('full_name', None)
+class RegistrationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    role = serializers.ChoiceField(choices=CustomUser.ROLE_CHOICES)
+    face_image = serializers.CharField(write_only=True)
 
-        else:
-            raise serializers.ValidationError({"role": "Invalid role. Must be 'freelancer' or 'client'."})
+    def validate_email(self, value):
+        normalized = value.lower().strip()
+        if CustomUser.objects(email=normalized).first():
+            raise serializers.ValidationError("This email is already registered.")
+        return normalized
 
-        return data
+    def validate(self, attrs):
+        embedding = compute_face_embedding(attrs.get("face_image"))
+        duplicate_user, _ = find_duplicate_face(embedding)
+        if duplicate_user:
+            raise serializers.ValidationError(
+                {"face_image": "A matching face already exists. Duplicate accounts are blocked."}
+            )
+        attrs["face_embedding_vector"] = embedding
+        return attrs
 
     def create(self, validated_data):
-        password = validated_data.pop('password')
-        user = CustomUser(**validated_data)
-        user.set_password(password)  # This also calls save()
+        embedding = validated_data.pop("face_embedding_vector")
+        validated_data.pop("face_image", None)
+
+        user = CustomUser(
+            email=validated_data["email"],
+            role=validated_data["role"],
+            email_verified=True,
+            face_verified=True,
+            account_status="pending_profile",
+        )
+        user.set_password(validated_data["password"])
+        user.save()
+
+        FaceEmbedding(user=user, vector=embedding).save()
         return user
- 
-class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
-    username_field = 'email'  # Use email instead of username
-    
+
+
+class FaceVerificationSerializer(serializers.Serializer):
+    face_image = serializers.CharField()
+
+
+class MarketplaceTokenObtainPairSerializer(TokenObtainPairSerializer):
+    username_field = "email"
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(write_only=True, required=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields.pop("username", None)
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        token['role'] = user.role  # optional claim
+        token["role"] = user.role
+        token["account_status"] = user.account_status
+        token["restricted"] = user.is_restricted
         return token
 
     def validate(self, attrs):
-        # Convert email to username for parent class
-        authenticate_kwargs = {
-            'username': attrs.get('email'),
-            'password': attrs.get('password'),
-        }
-        
-        from django.contrib.auth import authenticate
-        try:
-            user = CustomUser.objects.get(email=attrs.get('email'))
-            if not user.check_password(attrs.get('password')):
-                raise serializers.ValidationError({'detail': 'Invalid credentials'})
-        except CustomUser.DoesNotExist:
-            raise serializers.ValidationError({'detail': 'Invalid credentials'})
-        
+        email = attrs.get("email", "").lower().strip()
+        password = attrs.get("password")
+
+        user = CustomUser.objects(email=email).first()
+        if user is None or not user.check_password(password):
+            raise serializers.ValidationError({"detail": "Invalid credentials"})
+        if not user.is_active:
+            raise serializers.ValidationError({"detail": "User account is disabled"})
+
         refresh = self.get_token(user)
-        data = {'refresh': str(refresh), 'access': str(refresh.access_token)}
-        data['user'] = {
-            'email': user.email,
-            'role': user.role,
+        return {
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+            "user": serialize_user(user),
         }
-        return data

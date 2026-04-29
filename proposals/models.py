@@ -21,12 +21,15 @@ class Proposal(Document):
     
     # Status
     status = StringField(
-        choices=['pending', 'accepted', 'rejected', 'withdrew'],
+        choices=['pending', 'hired', 'rejected', 'withdrew', 'auto_rejected'],
         default='pending'
     )
     
     # Metadata
     rating = FloatField()
+    initial_rating = FloatField(default=0.0)
+    job_rating = FloatField()
+    final_rating = FloatField(default=0.0)
     completed = BooleanField(default=False)
     
     created_at = DateTimeField(default=datetime.utcnow)

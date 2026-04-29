@@ -1,12 +1,22 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
-from .views import JobViewSet, ApplyJobView, MyJobsView, MyApplicationsView
 
-router = DefaultRouter()
-router.register(r'', JobViewSet, basename='job')
+from .views import (
+    ContractClientFeedbackView,
+    ContractCompleteView,
+    ContractDetailView,
+    ContractListView,
+    JobDetailView,
+    JobListCreateView,
+    MyJobsView,
+)
+
 
 urlpatterns = [
-    path('apply/', ApplyJobView.as_view(), name='apply-job'),
-    path('my-jobs/', MyJobsView.as_view(), name='my-jobs'),
-    path('my-applications/', MyApplicationsView.as_view(), name='my-applications'),
-] + router.urls
+    path("", JobListCreateView.as_view(), name="jobs-list-create"),
+    path("my/", MyJobsView.as_view(), name="jobs-my"),
+    path("contracts/", ContractListView.as_view(), name="contracts-list"),
+    path("contracts/<str:contract_id>/", ContractDetailView.as_view(), name="contracts-detail"),
+    path("contracts/<str:contract_id>/complete/", ContractCompleteView.as_view(), name="contracts-complete"),
+    path("contracts/<str:contract_id>/client-feedback/", ContractClientFeedbackView.as_view(), name="contracts-client-feedback"),
+    path("<str:job_id>/", JobDetailView.as_view(), name="jobs-detail"),
+]

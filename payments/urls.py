@@ -1,9 +1,10 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
-from .views import TransactionViewSet, PayoutViewSet
 
-router = DefaultRouter()
-router.register(r'transactions', TransactionViewSet, basename='transaction')
-router.register(r'payouts', PayoutViewSet, basename='payout')
+from .views import PaymentCreateOrderView, PaymentListView, PaymentVerifyView
 
-urlpatterns = [] + router.urls
+
+urlpatterns = [
+    path("", PaymentListView.as_view(), name="payments-list"),
+    path("contracts/<str:contract_id>/create-order/", PaymentCreateOrderView.as_view(), name="payments-create-order"),
+    path("<str:payment_id>/verify/", PaymentVerifyView.as_view(), name="payments-verify"),
+]

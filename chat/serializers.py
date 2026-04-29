@@ -1,58 +1,62 @@
 from rest_framework import serializers
-from .models import Conversation, Message
+
+from core.policies import serialize_datetime
 
 
-class MessageSerializer(serializers.Serializer):
-    """Serializer for Message model"""
-    id = serializers.CharField(read_only=True)
-    conversation_id = serializers.CharField()
-    sender_id = serializers.CharField()
-    
-    content = serializers.CharField()
-    is_read = serializers.BooleanField(default=False)
-    read_at = serializers.DateTimeField(required=False, allow_null=True)
-    attachment_url = serializers.URLField(required=False, allow_null=True)
-    
-    created_at = serializers.DateTimeField(read_only=True)
-    updated_at = serializers.DateTimeField(read_only=True)
+class MessageInputSerializer(serializers.Serializer):
+    content = serializers.CharField(required=False, allow_blank=True, default="")
+    file = serializers.FileField(required=False)
+
+    def validate(self, attrs):
+        content = str(attrs.get("content", "") or "").strip()
+        file_obj = attrs.get("file")
+        if not content and not file_obj:
+            raise serializers.ValidationError("Provide message content or an attachment.")
+        attrs["content"] = content
+        return attrs
 
 
-class ConversationSerializer(serializers.Serializer):
-    """Serializer for Conversation model"""
-    id = serializers.CharField(read_only=True)
-    participant_ids = serializers.ListField(child=serializers.CharField())
-    subject = serializers.CharField(required=False)
-    
-    created_at = serializers.DateTimeField(read_only=True)
-    updated_at = serializers.DateTimeField(read_only=True)
+def serialize_conversation(conversation):
+    return {
+        "id": str(conversation.id),
+        "contract_id": str(conversation.contract.id),
+        "participant_ids": [str(user.id) for user in conversation.participant_ids],
+        "created_at": serialize_datetime(conversation.created_at),
+        "updated_at": serialize_datetime(conversation.updated_at),
+    }
 
 
-class ConversationDetailSerializer(ConversationSerializer):
-    """Detailed conversation with recent messages"""
-    participant_info = serializers.SerializerMethodField()
-    recent_messages = serializers.SerializerMethodField()
-    unread_count = serializers.SerializerMethodField()
+def serialize_message(message, current_user=None):
+    """
+    Serialize message with smart blocking:
+    - If message is BLOCKED and current_user is NOT the sender: Hide content, show generic "blocked" message
+    - If message is BLOCKED and current_user IS the sender: Show content with [BLOCKED] label for reference
+    - If message is SENT: Show normally
+    """
+    content = message.content
+    attachment_url = message.attachment_url
+    attachment_name = message.attachment_name
     
-    def get_participant_info(self, obj):
-        participants = []
-        for participant in obj.participant_ids:
-            participants.append({
-                'id': str(participant.id),
-                'email': participant.email,
-                'full_name': participant.full_name,
-            })
-        return participants
+    # If message is blocked and current user is NOT the sender, hide the actual content
+    if message.status == "blocked" and current_user and str(message.sender.id) != str(current_user.id):
+        content = "[This message was blocked due to contact or payment information]"
+        attachment_url = None
+        attachment_name = None
     
-    def get_recent_messages(self, obj):
-        messages = Message.objects.filter(conversation_id=obj).limit(10)
-        return MessageSerializer(messages, many=True).data
+    # If message is blocked and sender is viewing their own blocked message, add label
+    elif message.status == "blocked" and current_user and str(message.sender.id) == str(current_user.id):
+        content = f"[BLOCKED] {message.content}"
     
-    def get_unread_count(self, obj):
-        request = self.context.get('request')
-        if request:
-            unread = Message.objects.filter(
-                conversation_id=obj,
-                is_read=False
-            ).exclude(sender_id=request.user)
-            return unread.count()
-        return 0
+    return {
+        "id": str(message.id),
+        "conversation_id": str(message.conversation.id),
+        "sender_id": str(message.sender.id),
+        "content": content,
+        "attachment_url": attachment_url,
+        "attachment_name": attachment_name,
+        "attachment_type": message.attachment_type,
+        "attachment_scan_status": message.attachment_scan_status,
+        "status": message.status,
+        "moderation_flags": message.moderation_flags or [],
+        "created_at": serialize_datetime(message.created_at),
+    }
